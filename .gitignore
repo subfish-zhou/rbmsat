@@ -1,0 +1,7 @@
+__pycache__/
+/cnfdata
+/wcnfdata
+/rbm_models
+*.pdf
+*.cnf
+*.zip
