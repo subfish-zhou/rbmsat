@@ -81,12 +81,15 @@ def solve_maxsat(formula: CNFFormula, max_time=60, heuristic_interval=1000, batc
             num_vars_to_unassign = n_visible // 2
             vars_to_unassign = indices[:num_vars_to_unassign]
             # Set these variables to unassigned (-1)
-            assignment = v.clone().squeeze()
-            assignment[vars_to_unassign] = -1  # Use -1 to represent unassigned
-            # Apply unit propagation
-            assignment = unit_propagation(formula, assignment.cpu()).to(device)
-            # Update v
-            v = assignment.unsqueeze(0)
+
+            assignments = []
+            for i in range(batch_size):
+                assignment = v[i].clone()
+                assignment[vars_to_unassign] = -1  # Unassign variables
+                # Apply unit propagation
+                assignment = unit_propagation(formula, assignment.cpu()).to(device)
+                assignments.append(assignment)
+            v = torch.stack(assignments, dim=0)  # Shape: (B, N)
             # Reset moving averages
             nu_i.zero_()
         
@@ -103,7 +106,7 @@ def solve_maxsat(formula: CNFFormula, max_time=60, heuristic_interval=1000, batc
         # Optional: print progress
         if step % 10 == 0:
             elapsed_time = time.time() - start_time
-            print(f"Step {step}, Best: {best_num_satisfied}, formula size: {formula.num_clauses}, Elapsed Time: {elapsed_time:.2f}s")
+            print(f"Step {step}, Best: {best_num_satisfied}, current: {current_best_num_satisfied}, formula size: {formula.num_clauses}, Elapsed Time: {elapsed_time:.2f}s")
         
         # Check time limit
         if time.time() - start_time >= max_time:
@@ -111,6 +114,9 @@ def solve_maxsat(formula: CNFFormula, max_time=60, heuristic_interval=1000, batc
             break
             
     return best_v, best_num_satisfied
+
+
+
 
 def main():
     parser = argparse.ArgumentParser(description='RbmSAT solver')

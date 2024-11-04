@@ -2,6 +2,7 @@ __pycache__/
 /cnfdata
 /wcnfdata
 /rbm_models
+/.vscode
 *.pdf
 *.cnf
 *.zip
