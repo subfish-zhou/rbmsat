@@ -10,7 +10,6 @@ Usage:
 python main.py input.wcnf --max_time 60 --batch_size 64
 ```
 
-
 ### Args:
 
 Required:
@@ -19,11 +18,13 @@ Required:
 Optional:
 - max_time: (default: 60) Time limit in seconds.
 - batch_size: (default: 1) Number of parallel chains.
-- heuristic_interval: (default: 1000) how many sampling steps to use the unit propagation heuristic.
+- heuristic_interval: (default: 100) how many sampling steps to use the unit propagation heuristic.
+- F_s: (default: -1.0) Free energy for pre-trained RBM.
+- num_epochs: (default: 1000) Training epochs for pre-trained RBM.
+- lr: (default: 0.01) Learning rate for pre-trained RBM.
 - verbose: (default: False) Print progress.
 - device: (default: 'cuda' if torch.cuda.is_available() else 'cpu') Device to run on (cuda/cpu).
 
 ### TODO:
 
-- Add params for pre-trained RBM model
 - Test script

@@ -2,52 +2,33 @@ import torch
 import argparse
 import time
 
-from models.rbm import formulaRBM
-from models.rbm_parallel import formulaRBM_parallel
-from utils.cnf_parser import CNFFormula
-from utils.unit_propagation import unit_propagation
+from models.rbm import formulaRBM, formulaRBM_parallel
+from utils import CNFFormula, unit_propagation, count_satisfied_clauses
 
-def count_satisfied_clauses(formula: CNFFormula, v: torch.Tensor) -> int:
-    """
-    Counts the number of satisfied clauses in the CNF formula given an assignment.
-    Args:
-        formula: CNFFormula object
-        v: Tensor of size (batch_size, n_visible), values 0 or 1
-    Returns:
-        Number of satisfied clauses
-    """
-    B = v.shape[0]  # Batch size
-    num_satisfied = torch.zeros(B, device=v.device, dtype=torch.int32)
-
-    for clause in formula.clauses:
-        # Initialize a boolean tensor indicating if the clause is satisfied for each assignment
-        clause_satisfied = torch.zeros(B, device=v.device, dtype=torch.bool)
-        for lit in clause:
-            var = abs(lit) - 1  # 0-based index
-            val = v[:, var]  # Shape: (B,)
-            is_positive = lit > 0
-            is_true = val.bool() if is_positive else (~val.bool())
-            clause_satisfied |= is_true  # Element-wise OR across batch
-
-            # Early exit if all assignments satisfy the clause
-            if clause_satisfied.all():
-                break
-
-        # Increment count for assignments where clause is satisfied
-        num_satisfied += clause_satisfied.int()
-
-    # Find the assignment with the maximum number of satisfied clauses
-    max_num_satisfied, max_idx = num_satisfied.max(dim=0)
-    best_v = v[max_idx].unsqueeze(0).clone()
-
-    return best_v, max_num_satisfied.item()
-
-def solve_maxsat(formula: CNFFormula, max_time=60, heuristic_interval=1000, batch_size=1, device='cpu'):
+def solve_maxsat(formula: CNFFormula, 
+                 max_time=60, 
+                 heuristic_interval=100, 
+                 batch_size=1,
+                 verbose=False,
+                 F_s=-1.0,
+                 num_epochs=1000,
+                 lr=0.01,
+                 device='cpu'):
     
     if batch_size == 1:
-        rbm = formulaRBM(formula, device=device)
+        rbm = formulaRBM(formula, 
+                         F_s=F_s, 
+                         num_epochs=num_epochs, 
+                         lr=lr,
+                         device=device,
+                         verbose=verbose)
     else:
-        rbm = formulaRBM_parallel(formula, device=device)
+        rbm = formulaRBM_parallel(formula, 
+                                  F_s=F_s, 
+                                  num_epochs=num_epochs, 
+                                  lr=lr,
+                                  device=device,
+                                  verbose=verbose)
     n_visible = rbm.n_visible
     
     # Initialize v to random assignment
@@ -104,7 +85,7 @@ def solve_maxsat(formula: CNFFormula, max_time=60, heuristic_interval=1000, batc
             break
         
         # Optional: print progress
-        if step % 10 == 0:
+        if step % 100 == 0:
             elapsed_time = time.time() - start_time
             print(f"Step {step}, Best: {best_num_satisfied}, current: {current_best_num_satisfied}, formula size: {formula.num_clauses}, Elapsed Time: {elapsed_time:.2f}s")
         
@@ -116,24 +97,20 @@ def solve_maxsat(formula: CNFFormula, max_time=60, heuristic_interval=1000, batc
     return best_v, best_num_satisfied
 
 
-
-
 def main():
     parser = argparse.ArgumentParser(description='RbmSAT solver')
     parser.add_argument('input_file', type=str, help='Input CNF file in DIMACS format')
-    parser.add_argument('--batch_size', type=int, default=1, help='Number of parallel chains')
+    parser.add_argument('--batch_size', type=int, default=1024, help='Number of parallel chains')
     parser.add_argument('--max_time', type=int, default=60, help='Maximum time in seconds')
-    parser.add_argument('--heuristic_interval', type=int, default=1000, help='Heuristic interval for unit propagation')
+    parser.add_argument('--heuristic_interval', type=int, default=100, help='Heuristic interval for unit propagation')
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu',
                        help='Device to run on (cuda/cpu)')
     parser.add_argument('--verbose', type=bool, default=False, help='Print progress')
 
-    # TODO: Add params for pre-trained RBM
-    # parser.add_argument('--F_s', type=float, default=-1.0, help='Free energy for pre-trained RBM')
-    # parser.add_argument('--num_epochs', type=int, default=1000, help='Training epochs for pre-trained RBM')
-    # parser.add_argument('--lr', type=float, default=0.01, help='Learning rate for pre-trained RBM')
-
-
+    # params for pre-trained RBM
+    parser.add_argument('--F_s', type=float, default=-1.0, help='Free energy for pre-trained RBM')
+    parser.add_argument('--num_epochs', type=int, default=10000, help='Training epochs for pre-trained RBM')
+    parser.add_argument('--lr', type=float, default=0.01, help='Learning rate for pre-trained RBM')
     args = parser.parse_args()
 
     if args.verbose: print(f"Using device: {args.device}")
@@ -148,7 +125,11 @@ def main():
         formula, 
         max_time=args.max_time, 
         heuristic_interval=args.heuristic_interval, 
-        batch_size=args.batch_size, 
+        batch_size=args.batch_size,
+        verbose=args.verbose,
+        F_s=args.F_s,
+        num_epochs=args.num_epochs,
+        lr=args.lr,
         device=args.device)
     print(f"Best assignment satisfies {best_num_satisfied} clauses out of {formula.num_clauses}")
     print("Best assignment:")
