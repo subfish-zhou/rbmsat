@@ -4,18 +4,31 @@ import torch.optim as optim
 import os
 from utils import CNFFormula
 
+num_epochs_config = [{}, 
+                     {"num_epochs": 10000, "lr": 0.01, "F_s": -1.0},
+                     {"num_epochs": 10000, "lr": 0.01, "F_s": -1.0},
+                     {"num_epochs": 10000, "lr": 0.01, "F_s": -1.0},
+                     {"num_epochs": 10000, "lr": 0.01, "F_s": -1.0},
+                     {"num_epochs": 20000, "lr": 0.01, "F_s": -1.0},
+                     {"num_epochs": 50000, "lr": 0.01, "F_s": -1.0},
+                     {"num_epochs": 100000, "lr": 0.01, "F_s": -1.0}]
+
 class clauseRBM(nn.Module):
-    def __init__(self, clause_length, F_s=-1.0, num_epochs=1000, lr=0.01, device='cpu', verbose=False):
+    def __init__(self, clause_length, F_s=None, num_epochs=None, lr=None, device='cpu', verbose=False):
         super(clauseRBM, self).__init__()
         self.n_visible = clause_length
         self.n_hidden = clause_length if clause_length <= 3 else clause_length + 1
         self.device = device
         self.verbose = verbose
+
+        self.F_s = num_epochs_config[clause_length]["F_s"] if F_s is None else F_s
+        self.num_epochs = num_epochs_config[clause_length]["num_epochs"] if num_epochs is None else num_epochs
+        self.lr = num_epochs_config[clause_length]["lr"] if lr is None else lr
         
         # Initialize parameters
         model_dir='rbm_models'
         os.makedirs(model_dir, exist_ok=True)
-        model_filename = f'rbm_length_{clause_length}_F_{F_s}_num_epochs_{num_epochs}_lr_{lr}_device_{device}.pth'
+        model_filename = f'rbm_length_{clause_length}_F_{self.F_s}_num_epochs_{self.num_epochs}_lr_{self.lr}_device_{device}.pth'
         model_path = os.path.join(model_dir, model_filename)
 
         if os.path.exists(model_path):
@@ -23,9 +36,9 @@ class clauseRBM(nn.Module):
             self.d = nn.Parameter(torch.zeros(self.n_visible, device=device))
             self.b = nn.Parameter(torch.zeros(self.n_hidden, device=device))
             self.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
-            if self.verbose: print(f"Loaded pre-trained RBM from {model_path}")
+            # if self.verbose: print(f"Loaded pre-trained RBM from {model_path}")
         else:
-            self.train_clause_rbm(F_s=F_s, num_epochs=num_epochs, lr=lr, device=device)
+            self.train_clause_rbm(F_s=self.F_s, num_epochs=self.num_epochs, lr=self.lr, device=device)
             torch.save(self.state_dict(), model_path)
             if self.verbose: print(f"Saved pre-trained RBM to {model_path}")
         
@@ -74,7 +87,7 @@ class clauseRBM(nn.Module):
             loss.backward()
             optimizer.step()
 
-            if (epoch+1) % 200 == 0 and self.verbose:
+            if (epoch+1) % 1000 == 0 and self.verbose:
                 print(f"Epoch {epoch+1}, Loss: {loss.item()}")
 
 

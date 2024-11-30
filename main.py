@@ -100,7 +100,7 @@ def solve_maxsat(formula: CNFFormula,
 def main():
     parser = argparse.ArgumentParser(description='RbmSAT solver')
     parser.add_argument('input_file', type=str, help='Input CNF file in DIMACS format')
-    parser.add_argument('--batch_size', type=int, default=1024, help='Number of parallel chains')
+    parser.add_argument('--batch_size', type=int, default=128, help='Number of parallel chains')
     parser.add_argument('--max_time', type=int, default=60, help='Maximum time in seconds')
     parser.add_argument('--heuristic_interval', type=int, default=100, help='Heuristic interval for unit propagation')
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu',
@@ -119,7 +119,7 @@ def main():
     with open(args.input_file, 'r') as f:
         cnf_str = f.read()
 
-    formula = CNFFormula.from_dimacs(cnf_str)
+    formula = CNFFormula(cnf_str)
     
     best_v, best_num_satisfied = solve_maxsat(
         formula, 
