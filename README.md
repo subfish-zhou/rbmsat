@@ -2,7 +2,17 @@
 
 The reproduction of the RbmSAT solver for MaxSAT using Pytorch, from [https://arxiv.org/abs/2311.02101](https://arxiv.org/abs/2311.02101).
 
-[Data Example](https://drive.google.com/file/d/1OchnxDoQ--F4aVxrQgvM-o0nSW19gnDy/view)
+Usage: 
+
+```bash
+python main.py
+```
+
+(In process)
+
+
+
+## deprecated readme
 
 Usage: 
 
@@ -24,7 +34,3 @@ Optional:
 - lr: (default: 0.01) Learning rate for pre-trained RBM.
 - verbose: (default: False) Print progress.
 - device: (default: 'cuda' if torch.cuda.is_available() else 'cpu') Device to run on (cuda/cpu).
-
-### TODO:
-
-- Test script
