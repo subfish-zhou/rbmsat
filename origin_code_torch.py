@@ -1,160 +1,229 @@
+import time
+import torch
+import torch.nn.functional as F
+import logging
+from copy import copy
+
 from utils import CNFFormula
 from models.rbm import clauseRBM
-import torch
-import time
 import matplotlib.pyplot as plt
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-with open("wcnfdata/brock200_3.clq.wcnf", 'r') as f:
-    cnf_str = f.read()
+logging.basicConfig(level=logging.INFO)
 
-formula = CNFFormula(cnf_str)
-formula.padding()
-rbm = clauseRBM(formula.max_clause_length)
+def send_for_unit_propagation(assignments: torch.Tensor, variances: torch.Tensor) -> torch.Tensor:
+    """
+    Prepare a partial assignment for unit propagation by 'freezing' 
+    the half of the variables with the highest variance and setting 
+    the other half to -1 (unassigned).
 
-'''
-# Global variable to store the result of unit propagation
-# unit_prop_result = None
-# last_v = None  # To store the last variable assignments
-# T_global = None  # To store the clauses
+    Parameters
+    ----------
+    assignments : torch.Tensor
+        Current variable assignments (batch_size, num_vars), with values in {0, 1}.
+    variances : torch.Tensor
+        Estimated variances for each variable (batch_size, num_vars).
 
+    Returns
+    -------
+    torch.Tensor
+        Modified assignments where low-variance variables are set to -1.
+    """
+    batch_size, num_vars = assignments.shape
+    # Determine how many variables to keep fixed
+    half = num_vars // 2
+    modified = assignments.clone()
 
-def send_for_unit_propagation(v, mu):
-    global last_v, T_global, T
-    # Store the last variable assignments and clauses for unit propagation
-    last_v = v.clone()
-    T_global = T.clone()
+    for b in range(batch_size):
+        variance = variances[b]
+        # Sort by descending variance
+        sorted_indices = torch.argsort(variance, descending=True)
+        # Set lower half to -1 (unassigned)
+        modified[b, sorted_indices[half:]] = -1
 
-def fetch_unit_prop_result():
-    global last_v, T_global
-    # Perform unit propagation on the last variable assignments
-    # and return the new variable assignments
-    unit_prop_result = []
-    for v_i in last_v:
-        v_i_new = v_i.clone()
+    return modified
+
+def fetch_unit_prop_result(formula: CNFFormula, partial_assignments: torch.Tensor) -> torch.Tensor:
+    """
+    Apply unit propagation to the given partial assignments using the CNFFormula directly.
+
+    Parameters
+    ----------
+    formula : CNFFormula
+        The formula object containing clauses as a list of lists of integers.
+    partial_assignments : torch.Tensor
+        A (batch_size, num_vars) tensor representing partially unassigned assignments.
+        -1 indicates an unassigned variable, and 0/1 are assigned values.
+
+    Returns
+    -------
+    torch.Tensor
+        A (batch_size, num_vars) tensor with updated assignments after unit propagation.
+    """
+    results = []
+    for assignment in partial_assignments.cpu():
+        new_assignment = assignment.clone().detach()
         changed = True
         while changed:
             changed = False
-            # For each clause
-            for clause in T_global:
-                unassigned_literals = []
+            for clause in formula.clauses:
+                num_unassigned = 0
+                last_unassigned_lit = None
                 clause_satisfied = False
                 for lit in clause:
-                    if lit == 0:
-                        continue  # Skip padding zeros
-                    var_idx = abs(lit) - 1
-                    var_value = v_i_new[var_idx].item()
-                    if var_value == -1:
-                        unassigned_literals.append(lit)
-                    elif (lit > 0 and var_value == 1) or (lit < 0 and var_value == 0):
-                        clause_satisfied = True
-                        break  # Clause is satisfied
-                if not clause_satisfied and len(unassigned_literals) == 1:
-                    # Unit clause found; assign the unit literal
-                    lit = unassigned_literals[0]
-                    var_idx = abs(lit) - 1
-                    v_i_new[var_idx] = 1 if lit > 0 else 0
-                    changed = True  # Changes occurred; need to recheck
-        unit_prop_result.append(v_i_new)
-    unit_prop_result = torch.stack(unit_prop_result)
-    return unit_prop_result
-'''
+                    var = abs(lit) - 1  # 0-based index
+                    val = new_assignment[var].item()
+                    if val == -1:
+                        num_unassigned += 1
+                        last_unassigned_lit = lit
+                    else:
+                        is_true = (val == 1 and lit > 0) or (val == 0 and lit < 0)
+                        if is_true:
+                            clause_satisfied = True
+                            break
+                if not clause_satisfied and num_unassigned == 1:
+                    # Unit clause, assign the last unassigned variable to satisfy the clause
+                    var = abs(last_unassigned_lit) - 1
+                    new_assignment[var] = 1 if last_unassigned_lit > 0 else 0
+                    changed = True
+        results.append(new_assignment)
+    return torch.stack(results).to(partial_assignments.device)
 
-def gather_and_count(v, Q, polarity):
-    c = torch.einsum('bv,ckv->bck', v, Q) # (batch_size, num_clause, max_len_clause)
+def gather_and_count(assignments, clause_var_matrix, polarity):
+    """
+    Compute the clause satisfaction count for given assignments.
+    """
+    c = torch.einsum('bv,ckv->bck', assignments, clause_var_matrix) 
     return c, (((polarity + c) == 2) + ((polarity + c) == -1)).any(dim=-1).sum(dim=-1)
 
-def time_remaining(start_time, time_limit):
-    if time.time() - start_time > time_limit:
-        return False
-    return True
 
-def construct_Q(T, num_var, device):
-    Q = torch.zeros(T.shape[0], T.shape[1], num_var, device=device) #(num_clause, len_clause, num_var)
-    for clause_idx, clause in enumerate(T):
+def time_remaining(start_time, time_limit):
+    return (time.time() - start_time) <= time_limit
+
+
+def construct_Q(clauses, num_var, device):
+    Q = torch.zeros(clauses.shape[0], clauses.shape[1], num_var, device=device)
+    for clause_idx, clause in enumerate(clauses):
         for lit_idx, lit in enumerate(clause):
             if lit != 0:
-                Q[clause_idx, lit_idx, torch.abs(lit)-1] = 1.0
+                Q[clause_idx, lit_idx, abs(lit)-1] = 1.0
     return Q
 
-def rbmsat(W_c, b_c, T, B, N, seed, time_limit, upp=100, upw=1, alpha=0.1): # B is batch size, N is the total number of variables
-    # Set random seed for reproducibility
+
+def rbmsat(formula, W_c, b_c, batch_size, seed, time_limit, heuristic_inteval=100, heuristic_delay=1, alpha=0.1):
+    """
+    RBM-based SAT solver main loop.
+
+    Parameters
+    ----------
+    formula : CNFFormula
+        The CNF formula object.
+    W_c : torch.Tensor
+        Clause RBM weight matrix.
+    b_c : torch.Tensor
+        Clause RBM bias vector.
+    batch_size : int
+        Batch size for parallel runs.
+    seed : int
+        Random seed.
+    time_limit : float
+        Maximum allowed time in seconds.
+    upp : int
+        Unit propagation period.
+    upw : int
+        Weight for unit propagation steps.
+    alpha : float
+        Smoothing parameter for variance updates.
+
+    Returns
+    -------
+    s_max_list : list
+        A list of tuples (step, max_satisfied_clauses).
+    best_assignment : torch.Tensor
+        The best assignment found.
+    """
+    formula_padding_copy = copy(formula)
+    formula_padding_copy.padding()
+    clauses = torch.tensor(formula_padding_copy.clauses, device=device)
+    num_vars = formula.num_vars
+
     torch.manual_seed(seed)
-    
-    # Initialize variables
-    s_max = 0 # initially 0 clauses are satisfied
-    v = torch.bernoulli(torch.ones(B, N, device=W_c.device) * 0.5)  # sample random inits 
-    # mu = 0.25 * torch.ones_like(v) 
-    # Setup tensors
-    polarity = torch.sign(T)  # strictly {1, -1}, not 0 (-1 2 -3) -> (-1 1 -1)
-    Q = construct_Q(T, formula.num_vars, device) # C * K * N    (num_clause, max_len_clause, num_var)
-    W = torch.einsum('ck,kh->ckh', polarity, W_c) # polarity.unsqueeze(1) * W_c.unsqueeze(2) # element-wise multiplication
-    # print(W)
-    b = b_c.repeat([T.shape[0], 1]) + torch.mm((1 - polarity) / 2, W_c)
-    
-    # t, d = 1, -1
-    step = 0
+    assignments = torch.bernoulli(torch.ones(batch_size, num_vars, device=W_c.device)*0.5)
+    variances = 0.25 * torch.ones_like(assignments)  # initial variance guess
+
+    polarity = torch.sign(clauses)
+    clause_var_matrix = construct_Q(clauses, num_vars, device)
+    W = torch.einsum('ck,kh->ckh', polarity, W_c)
+    b = b_c.repeat([clauses.shape[0], 1]) + torch.mm((1 - polarity) / 2, W_c)
+
+    step, d = 1, -1
     s_max_list = []
-    best_v = torch.ones(N, device=W_c.device)
-    
+    best_assignment = torch.ones(num_vars, device=W_c.device)
+    s_max = 0
     start_time = time.time()
+
+    # Using these variables to store partial states for unit propagation
+    last_partial = assignments.clone()
     with torch.no_grad():
-        while True:
-            if time_remaining(start_time, time_limit):
-                step += 1
-                # if step == 3:
-                #     break
-                #     # print(f"step {step}, {s_max_list[-1]}")
-                
-                # if upp > 0 and d == 0:
-                #    v_u = torch.vstack([v, fetch_unit_prop_result()])
-                #    _, s_u = gather_and_count(v_u, Q, polarity)
-                #    ranks = torch.argsort(s_u)
-                #    v = v_u[ranks[-B:]]
-                #    mu = torch.vstack([mu, mu])[ranks[-B:]]
-                # if upp > 0 and t % upp == 0:
-                #     d = upw
-                #     send_for_unit_propagation(v, mu)
-                    
-                c, s = gather_and_count(v, Q, polarity)
-                s_max_step, idx_max = s.max(dim=0)
-                # print(s_max_step.item())
-                # print(f"v:{v[idx_max]}")
-                if s_max_step.item() > s_max:
-                    s_max = s_max_step.item()
-                    best_v = v[idx_max].clone()
-                    s_max_list.append((step, s_max))
-                    print(f"new s_max found {s_max} at step {step}")
+        while time_remaining(start_time, time_limit):
 
-                h_logits = b + torch.einsum('bck,ckh->bch', c, W) # 'bck,chk->bhk'  bck,ckh->bch
-                
-                h = torch.bernoulli(torch.sigmoid(h_logits))
-                # print(h[0,0:10])
-                ro = torch.sigmoid(torch.einsum('bch,ckh,ckv->bv', h, W, Q)) # 'bhk,chk,ckv->bv'
-                # print(f"ro:{ro}")
-                # mu = (1 - alpha) * mu + alpha * ro * (1 - ro)
-                v = torch.bernoulli(ro)
-                
-                # t, d = t + 1, max(d - 1, -1)
-            else:
-                s_max_list.append((step, s_max_list[-1][-1]))
-                break
-        
-    return s_max_list, best_v
+            if heuristic_inteval > 0 and d == 0:
+                # print("use heuristic")
+                # Fetch updated assignments from unit propagation
+                up_assignments = fetch_unit_prop_result(formula, last_partial)
+                combined = torch.vstack([assignments, up_assignments])
+                _, s_u = gather_and_count(combined, clause_var_matrix, polarity)
+                ranks = torch.argsort(s_u)
+                assignments = combined[ranks[-batch_size:]]
+                variances = torch.vstack([variances, variances])[ranks[-batch_size:]]
 
-T = torch.tensor(formula.clauses, device=device)
+            if heuristic_inteval > 0 and step % heuristic_inteval == 0:
+                d = heuristic_delay
+                # Update partial assignments for unit propagation
+                last_partial = send_for_unit_propagation(assignments, variances)
 
-bath_size = 128
-seed = 42
-timeout = 300
+            c, s = gather_and_count(assignments, clause_var_matrix, polarity)
+            s_max_step, idx_max = s.max(dim=0)
+            if s_max_step.item() > s_max:
+                s_max = s_max_step.item()
+                best_assignment = assignments[idx_max].clone()
+                s_max_list.append((step, s_max))
+                logging.info(f"New s_max found {s_max} at step {step}")
 
-alpha = 0.1
-upp = 100
-upw = 1
+            h_logits = b + torch.einsum('bck,ckh->bch', c, W)
+            h = torch.bernoulli(torch.sigmoid(h_logits))
+            ro = torch.sigmoid(torch.einsum('bch,ckh,ckv->bv', h, W, clause_var_matrix))
+            variances = (1 - alpha) * variances + alpha * ro * (1 - ro)
+            assignments = torch.bernoulli(ro)
 
-s_max, best_v = rbmsat(rbm.W, rbm.b, T, bath_size, formula.num_vars, seed, timeout, upp, upw, alpha)
-print(best_v)
-x_ax, y_ax = zip(*s_max)
-plt.step(x_ax,y_ax)
-plt.show()
+            step, d = step + 1, max(d - 1, -1)
+    
+    s_max_list.append((step, s_max_list[-1][-1]))
+
+    return s_max_list, best_assignment
+
+
+if __name__ == "__main__":
+    # Example usage
+    with open("wcnfdata/brock200_3.clq.wcnf", 'r') as f:
+        cnf_str = f.read()
+
+    formula = CNFFormula(cnf_str)
+    rbm = clauseRBM(formula.max_clause_length, device=device)
+
+    batch_size = 1024
+    seed = 42
+    timeout = 3000
+    alpha, heuristic_inteval, heuristic_delay = 0.1, 5000, 1
+
+    s_max_list, best_assignment = rbmsat(formula, rbm.W, rbm.b, batch_size, seed, timeout, heuristic_inteval, heuristic_delay, alpha)
+    logging.info(f"Best assignment found: {best_assignment}")
+
+    # Optional: plot results
+    if s_max_list:
+        x_ax, y_ax = zip(*s_max_list)
+        plt.step(x_ax, y_ax)
+        plt.xlabel('Step')
+        plt.ylabel('Max Satisfied Clauses')
+        plt.show()
