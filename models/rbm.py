@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import os
-from data.utils import CNFFormula
+from data.formula import CNFFormula
 
 num_epochs_config = [{}, 
                      {"num_epochs": 10000, "lr": 0.01, "F_s": -1.0},
